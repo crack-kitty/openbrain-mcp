@@ -24,7 +24,7 @@ OB1 established the vision: one database, one protocol, every AI tool shares the
 | Search | Vector cosine | Hybrid (vector + Postgres BM25 keyword) |
 | Validation | SHA fingerprint dedup on capture | Write gate: headline/body word limits + semantic-similarity dedup |
 | Session tracking | None | `start_session` / `end_session` with handoff notes |
-| Memory lifecycle | Manual only | Decay scoring on facts, soft-delete via `forget`, supersede chain for rules |
+| Memory lifecycle | Manual only | Reactivation tracking on facts (recall bumps the score; periodic decay is scaffolded but disabled by default), soft-delete via `forget`, supersede chain for rules |
 | Audit | None | Append-only `audit_log` for every mutation |
 | Deployment | Supabase Edge Functions | Docker / Onramp / any container host |
 
@@ -33,7 +33,7 @@ OB1 established the vision: one database, one protocol, every AI tool shares the
 - **11 MCP tools**: `capture`, `search`, `recall`, `boot`, `browse`, `stats`, `update`, `supersede`, `forget`, `start_session`, `end_session`
 - **Typed memory tables** so different memory types can have different lifecycles:
   - `rules` — immutable behavioral guidance, modified only via `supersede`
-  - `facts` — knowledge with decay scoring; recall reactivates a fading fact
+  - `facts` — knowledge with a reactivation score that recall bumps upward; the periodic decay process is scaffolded (env knobs exposed) but disabled by default in this release
   - `incidents` — postmortems, archivable
   - `tasks` — `open` / `blocked` / `done` / `stale`
 - **Write gate** validates every capture: headline ≤15 words, body ≤400 words, semantic-similarity duplicate check (cosine threshold)
@@ -154,11 +154,13 @@ All configuration is via environment variables. Defaults in parentheses.
 | `OPENBRAIN_HEADLINE_MAX_WORDS` | `15` | Hard cap on headline length |
 | `OPENBRAIN_BODY_MAX_WORDS` | `400` | Hard cap on body length |
 
-### Memory decay
+### Memory decay (scaffolded — disabled by default)
+The fields exist in the schema and the env knobs are wired through `config.py`, but the periodic decay/consolidation process is not yet running in this release. Recall still bumps a fact's `decay_score` upward; nothing currently decreases it.
+
 | Variable | Default | Notes |
 |---|---|---|
-| `OPENBRAIN_DECAY_LAMBDA` | `0.005` | Per-day decay rate for facts |
-| `OPENBRAIN_CONSOLIDATION_INTERVAL` | `0` | Minutes between consolidation passes (0 = disabled) |
+| `OPENBRAIN_DECAY_LAMBDA` | `0.005` | Reserved: per-day decay rate (consumed only when consolidation is enabled in a future release) |
+| `OPENBRAIN_CONSOLIDATION_INTERVAL` | `0` | Reserved: minutes between consolidation passes (0 = disabled; no consumer in this release) |
 
 ### Boot payload
 | Variable | Default | Notes |
@@ -181,13 +183,13 @@ The schema separates memories by lifecycle, not by content. Behavioral rules and
 OpenBrain MCP uses four typed tables:
 
 - `rules` — immutable, severity-classified (`BLOCKER` / `PATTERN`), modified only via `supersede` so the audit chain is preserved. Loaded into the boot payload.
-- `facts` — knowledge with `access_count` and `decay_score`. Recall reactivates a fading fact. Not loaded at boot — fetched on demand via `search` + `recall`.
+- `facts` — knowledge with `access_count` and a `decay_score` that recall bumps upward. The periodic decay process is scaffolded (env knobs exist) but not yet active in this release, so today this is reactivation tracking rather than full decay. Not loaded at boot — fetched on demand via `search` + `recall`.
 - `incidents` — postmortems and bug records, archivable after a quiet period.
 - `tasks` — open / blocked / done / stale, surfaced in the boot payload while open.
 
 A `memory_index` table mirrors headlines and embeddings across all four kinds for a single search query path. An HNSW index serves cosine search; a `tsvector` GIN index serves keyword search. Hybrid scoring blends the two with a configurable weight.
 
-Every mutation lands in `audit_log` with a JSON snapshot of the row at the time of the change — useful when something looks wrong six months from now.
+Every mutation lands in `audit_log` with a JSON snapshot of the row at the time of the change — useful when something looks wrong six months from now. The audit write is **best-effort**: it runs after the main mutation transaction commits, on a separate connection, so a process crash between the commit and the audit insert can leave a committed mutation with no audit row. For a personal memory service this is the right trade-off (the audit is for hindsight, not authorization); harden it if you're storing material that demands a true audit trail.
 
 ## Development
 

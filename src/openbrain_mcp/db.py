@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,19 +21,42 @@ async def _init_conn(conn: asyncpg.Connection) -> None:
     )
 
 
-async def apply_schema(database_url: str) -> None:
+async def apply_schema(database_url: str, embedding_dimensions: int) -> None:
     """Apply schema using a one-shot connection — must run BEFORE pool creation
     because the pool's connection init registers the vector type, which only
-    exists after the pgvector extension is created in the schema."""
+    exists after the pgvector extension is created in the schema.
+
+    The schema uses `vector(__EMBEDDING_DIM__)` as a placeholder; the configured
+    embedding dimension is substituted at apply time. If a database already
+    exists with a different vector dimension, this function does NOT alter
+    existing columns — it raises if the dim doesn't match.
+    """
     if not SCHEMA_PATH.exists():
         raise RuntimeError(f"schema file not found: {SCHEMA_PATH}")
-    sql = SCHEMA_PATH.read_text()
+    dim = int(embedding_dimensions)
+    if dim < 1 or dim > 8192:
+        raise RuntimeError(f"embedding_dimensions out of range: {dim}")
+    sql = SCHEMA_PATH.read_text().replace("__EMBEDDING_DIM__", str(dim))
     conn = await asyncpg.connect(database_url)
     try:
         await conn.execute(sql)
+        existing_type = await conn.fetchval(
+            """
+            SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+             WHERE attrelid = 'memory_index'::regclass AND attname = 'embedding'
+            """
+        )
+        if existing_type:
+            m = re.match(r"vector\((\d+)\)", existing_type)
+            if m and int(m.group(1)) != dim:
+                raise RuntimeError(
+                    f"existing memory_index.embedding type is {existing_type} but "
+                    f"OPENBRAIN_EMBEDDING_DIMENSIONS={dim}; either reset the database "
+                    f"or set OPENBRAIN_EMBEDDING_DIMENSIONS to match"
+                )
     finally:
         await conn.close()
-    logger.info("schema applied from %s", SCHEMA_PATH)
+    logger.info("schema applied from %s (vector dim=%d)", SCHEMA_PATH, dim)
 
 
 async def make_pool(database_url: str) -> asyncpg.Pool:

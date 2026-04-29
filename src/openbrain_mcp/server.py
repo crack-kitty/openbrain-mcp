@@ -1,14 +1,13 @@
 """OpenBrain MCP server — typed-table memory layer for AI agents."""
 from __future__ import annotations
 
+import hmac
 import json
 import logging
-import math
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
-
-import uuid
 
 import asyncpg
 from fastmcp import FastMCP
@@ -123,7 +122,7 @@ async def _check_duplicate(
 async def lifespan(server: FastMCP):  # type: ignore[no-untyped-def]
     settings = load_settings()
     CTX.settings = settings
-    await apply_schema(settings.database_url)
+    await apply_schema(settings.database_url, settings.embedding_dimensions)
     CTX.pool = await make_pool(settings.database_url)
     CTX.embeddings = EmbeddingClient(settings)
     logger.info(
@@ -200,59 +199,60 @@ async def capture(
     embedding = await CTX.embeddings.embed(embed_text)
 
     async with CTX.pool.acquire() as conn:
-        dup = await _check_duplicate(
-            conn,
-            kind=kind,
-            embedding=embedding,
-            project=project,
-            threshold=settings.dedup_threshold,
-        )
-        if dup is not None:
-            return {"ok": False, "duplicate": dup, "hint": "use update or supersede"}
+        async with conn.transaction():
+            dup = await _check_duplicate(
+                conn,
+                kind=kind,
+                embedding=embedding,
+                project=project,
+                threshold=settings.dedup_threshold,
+            )
+            if dup is not None:
+                return {"ok": False, "duplicate": dup, "hint": "use update or supersede"}
 
-        if kind == "rule":
-            row = await conn.fetchrow(
-                """
-                INSERT INTO rules (headline, body, severity, project, tags, embedding, pinned)
-                VALUES ($1, $2, $3::rule_severity, $4, $5, $6, $7)
-                RETURNING *
-                """,
-                headline, body, severity, project, tags or [], embedding, pinned,
-            )
-        elif kind == "fact":
-            row = await conn.fetchrow(
-                """
-                INSERT INTO facts (headline, body, project, source, people, topics, tags, embedding)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                RETURNING *
-                """,
-                headline, body, project, source,
-                people or [], topics or [], tags or [], embedding,
-            )
-        elif kind == "incident":
-            row = await conn.fetchrow(
-                """
-                INSERT INTO incidents (headline, body, project, severity, tags, embedding)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                RETURNING *
-                """,
-                headline, body, project, severity, tags or [], embedding,
-            )
-        else:  # task
-            row = await conn.fetchrow(
-                """
-                INSERT INTO tasks (headline, body, project, priority, tags, embedding)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                RETURNING *
-                """,
-                headline, body, project, priority or 3, tags or [], embedding,
-            )
+            if kind == "rule":
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO rules (headline, body, severity, project, tags, embedding, pinned)
+                    VALUES ($1, $2, $3::rule_severity, $4, $5, $6, $7)
+                    RETURNING *
+                    """,
+                    headline, body, severity, project, tags or [], embedding, pinned,
+                )
+            elif kind == "fact":
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO facts (headline, body, project, source, people, topics, tags, embedding)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    RETURNING *
+                    """,
+                    headline, body, project, source,
+                    people or [], topics or [], tags or [], embedding,
+                )
+            elif kind == "incident":
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO incidents (headline, body, project, severity, tags, embedding)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING *
+                    """,
+                    headline, body, project, severity, tags or [], embedding,
+                )
+            else:  # task
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO tasks (headline, body, project, priority, tags, embedding)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    RETURNING *
+                    """,
+                    headline, body, project, priority or 3, tags or [], embedding,
+                )
 
-        ref_id = str(row["id"])
-        await _index_upsert(
-            conn, kind=kind, ref_id=ref_id, headline=headline,
-            embedding=embedding, project=project,
-        )
+            ref_id = str(row["id"])
+            await _index_upsert(
+                conn, kind=kind, ref_id=ref_id, headline=headline,
+                embedding=embedding, project=project,
+            )
 
     snapshot = _row_to_dict(row)
     await audit(
@@ -639,9 +639,9 @@ async def update(
     sets: list[str] = []
     params: list[Any] = []
 
-    def add(col: str, val: Any) -> None:
+    def add(col: str, val: Any, *, cast: str = "") -> None:
         params.append(val)
-        sets.append(f"{col} = ${len(params)}")
+        sets.append(f"{col} = ${len(params)}{cast}")
 
     if headline is not None:
         gate = validate_all(
@@ -663,7 +663,7 @@ async def update(
         add("tags", tags)
     if kind == "task":
         if status is not None:
-            add("status", status)
+            add("status", status, cast="::task_status")
             if status == "done":
                 add("completed_at", datetime.utcnow())
         if priority is not None:
@@ -674,28 +674,26 @@ async def update(
         return {"ok": False, "error": "no fields to update"}
 
     params.append(ref_id)
-    cast = "::task_status" if (kind == "task" and status is not None) else ""
-    if cast:
-        sets = [s.replace(" = $", f"{cast} = $", 1) if "status =" in s else s for s in sets]
     sql = f"UPDATE {table} SET {', '.join(sets)} WHERE id = ${len(params)} RETURNING *"  # noqa: S608
 
     async with CTX.pool.acquire() as conn:
-        row = await conn.fetchrow(sql, *params)
-        if row is None:
-            return {"ok": False, "error": "not found"}
+        async with conn.transaction():
+            row = await conn.fetchrow(sql, *params)
+            if row is None:
+                return {"ok": False, "error": "not found"}
 
-        if headline is not None or body is not None:
-            embed_text = f"{row['headline']}\n\n{row['body']}".strip()
-            embedding = await CTX.embeddings.embed(embed_text)
-            await conn.execute(
-                f"UPDATE {table} SET embedding = $1 WHERE id = $2",  # noqa: S608
-                embedding, ref_id,
-            )
-            await _index_upsert(
-                conn, kind=kind, ref_id=str(row["id"]),
-                headline=row["headline"], embedding=embedding,
-                project=row["project"],
-            )
+            if headline is not None or body is not None:
+                embed_text = f"{row['headline']}\n\n{row['body']}".strip()
+                embedding = await CTX.embeddings.embed(embed_text)
+                await conn.execute(
+                    f"UPDATE {table} SET embedding = $1 WHERE id = $2",  # noqa: S608
+                    embedding, ref_id,
+                )
+                await _index_upsert(
+                    conn, kind=kind, ref_id=str(row["id"]),
+                    headline=row["headline"], embedding=embedding,
+                    project=row["project"],
+                )
 
     snapshot = _row_to_dict(row)
     await audit(
@@ -875,14 +873,24 @@ class APIKeyAuth(BaseHTTPMiddleware):
     def __init__(self, app, *, access_key: str | None) -> None:  # type: ignore[no-untyped-def]
         super().__init__(app)
         self.access_key = access_key
+        self._access_key_bytes = (
+            access_key.encode("utf-8") if access_key is not None else None
+        )
+        if access_key is None:
+            logger.warning(
+                "OPENBRAIN_MCP_ACCESS_KEY is not set — server is UNAUTHENTICATED. "
+                "Set OPENBRAIN_MCP_ACCESS_KEY to a strong random value before exposing publicly."
+            )
 
     async def dispatch(self, request, call_next):  # type: ignore[no-untyped-def]
         if request.url.path == "/health":
             return await call_next(request)
-        if self.access_key is None:
+        if self._access_key_bytes is None:
             return await call_next(request)
         auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer ") and auth[7:] == self.access_key:
+        if auth.startswith("Bearer ") and hmac.compare_digest(
+            auth[7:].encode("utf-8"), self._access_key_bytes
+        ):
             return await call_next(request)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 

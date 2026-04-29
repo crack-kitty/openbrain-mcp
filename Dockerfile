@@ -9,17 +9,20 @@ WORKDIR /app
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --uid 10001 --shell /usr/sbin/nologin openbrain
 
-COPY requirements.txt .
+COPY --chown=openbrain:openbrain requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY src/ ./src/
-COPY schema/ ./schema/
+COPY --chown=openbrain:openbrain src/ ./src/
+COPY --chown=openbrain:openbrain schema/ ./schema/
 
 ENV PYTHONPATH=/app/src \
     OPENBRAIN_HOST=0.0.0.0 \
     OPENBRAIN_PORT=8080
+
+USER openbrain
 
 EXPOSE 8080
 
