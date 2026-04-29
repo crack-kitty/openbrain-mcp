@@ -1,0 +1,6 @@
+fastmcp>=2.11
+asyncpg==0.30.0
+pgvector==0.3.6
+httpx>=0.28.1
+uvicorn[standard]>=0.32
+starlette>=0.41
