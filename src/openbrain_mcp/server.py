@@ -907,7 +907,7 @@ async def _health(_request):  # type: ignore[no-untyped-def]
 
 
 def build_app() -> Starlette:
-    mcp_app = mcp.http_app(transport="streamable-http")
+    mcp_app = mcp.http_app(path="/mcp", stateless_http=True)
 
     @asynccontextmanager
     async def combined_lifespan(app):  # type: ignore[no-untyped-def]
