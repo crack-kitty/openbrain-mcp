@@ -56,7 +56,7 @@ make start-service openbrain
 make logs openbrain
 ```
 
-The service is then reachable at `https://openbrain.<HOST_DOMAIN>/mcp/` with TLS via Traefik. The auto-generated `OPENBRAIN_MCP_ACCESS_KEY` in `services-enabled/openbrain.env` is what your MCP clients authenticate with.
+The service is then reachable at `https://openbrain.<HOST_DOMAIN>/mcp` with TLS via Traefik. The auto-generated `OPENBRAIN_MCP_ACCESS_KEY` in `services-enabled/openbrain.env` is what your MCP clients authenticate with.
 
 You'll also need an embedding model in Ollama:
 
@@ -82,22 +82,27 @@ docker run -d --name openbrain --network openbrain -p 8080:8080 \
   ghcr.io/crack-kitty/openbrain-mcp:latest
 ```
 
-Then point an MCP client at `http://localhost:8080/mcp/` with the bearer token from your run command.
+Then point an MCP client at `http://localhost:8080/mcp` with the bearer token from your run command (see [Connecting AI clients](#connecting-ai-clients) below).
 
 ## Connecting AI clients
 
-Every MCP-over-HTTP client needs three things: the URL (`https://your-host/mcp/`), the transport (`http` / `streamable-http`), and the bearer auth header.
+The server accepts your access key two ways:
+
+- **Bearer header** — `Authorization: Bearer YOUR_KEY` (Claude Code, curl, any client that supports custom headers)
+- **Query parameter** — `?key=YOUR_KEY` appended to the URL (Claude.ai, ChatGPT, clients that don't support headers)
+
+Both methods validate against the same `OPENBRAIN_MCP_ACCESS_KEY`.
 
 ### Claude Code
 
-`~/.claude.json`:
+Add to the `mcpServers` block in `~/.claude.json`:
 
 ```json
 {
   "mcpServers": {
     "openbrain": {
-      "transport": "http",
-      "url": "https://openbrain.example.com/mcp/",
+      "type": "http",
+      "url": "https://openbrain.example.com/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_OPENBRAIN_MCP_ACCESS_KEY"
       }
@@ -108,15 +113,21 @@ Every MCP-over-HTTP client needs three things: the URL (`https://your-host/mcp/`
 
 ### Claude.ai (Desktop / Web)
 
-Settings → Connectors → **Add custom connector** → paste the `/mcp/` URL and the bearer token.
+Settings → Integrations → **Add more integrations...** → scroll to the bottom → **Add custom integration** → paste this URL:
+
+```
+https://openbrain.example.com/mcp?key=YOUR_OPENBRAIN_MCP_ACCESS_KEY
+```
+
+Select **No Authentication** — the access key is embedded in the URL.
 
 ### ChatGPT (Plus / Pro)
 
-Settings → Connectors → **Developer Mode** → Add custom MCP server → paste URL and token.
+Settings → Connectors → **Developer Mode** → Add custom MCP server → paste the same `?key=` URL. Select **No Authentication**.
 
 ### Cursor / Gemini CLI / Other MCP clients
 
-Anything that speaks MCP over streamable HTTP works. The shape of the config varies — give the client the `/mcp/` URL and the `Authorization: Bearer …` header.
+Any client that speaks MCP over HTTP works. Use whichever auth method your client supports — Bearer header or `?key=` query parameter. The MCP endpoint is `/mcp`.
 
 ## Configuration
 
@@ -128,7 +139,7 @@ All configuration is via environment variables. Defaults in parentheses.
 | `DATABASE_URL` | *(required)* | Postgres connection string with pgvector available |
 | `OPENBRAIN_HOST` | `0.0.0.0` | Bind address |
 | `OPENBRAIN_PORT` | `8080` | Listen port |
-| `OPENBRAIN_MCP_ACCESS_KEY` | *(unset → no auth)* | Bearer token clients must pass |
+| `OPENBRAIN_MCP_ACCESS_KEY` | *(unset → no auth)* | Access key — pass as `Authorization: Bearer` header or `?key=` query param |
 
 ### Embeddings
 | Variable | Default | Notes |
