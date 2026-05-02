@@ -887,9 +887,16 @@ class APIKeyAuth(BaseHTTPMiddleware):
             return await call_next(request)
         if self._access_key_bytes is None:
             return await call_next(request)
+        # Bearer token (Claude Code, curl)
         auth = request.headers.get("authorization", "")
         if auth.startswith("Bearer ") and hmac.compare_digest(
             auth[7:].encode("utf-8"), self._access_key_bytes
+        ):
+            return await call_next(request)
+        # Query parameter ?key=VALUE (claude.ai, ChatGPT, clients that don't support headers)
+        key_param = request.query_params.get("key", "")
+        if key_param and hmac.compare_digest(
+            key_param.encode("utf-8"), self._access_key_bytes
         ):
             return await call_next(request)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
